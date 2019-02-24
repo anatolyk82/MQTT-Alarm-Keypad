@@ -14,6 +14,8 @@
 #define MQTT_STATUS_PAYLOAD_OFF "offline"
 
 #define WIFI_AP_NAME "AlarmKeypad"
-#define WIFI_AP_PASS "123456"
+#define WIFI_AP_PASS "123456789"
+
+#define FIRMWARE_VERSION "0.2.0"
 
 #endif // MQTT_ALARM_PANEL_CONFIG_H

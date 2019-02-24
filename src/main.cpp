@@ -1,4 +1,3 @@
-
 #include "MyQueueArray.h"
 #include "config.h"
 
@@ -15,7 +14,7 @@
 
 #include <AsyncMqttClient.h>      // https://github.com/marvinroger/async-mqtt-client - Async MQTT client
 
-#include "Keypad.h"
+#include <Keypad.h>
 #include <FS.h>
 
 #include <SimpleTimer.h>          // https://github.com/schinken/SimpleTimer
@@ -83,20 +82,6 @@ bool errActive = false;
 // Lock the keypad
 unsigned long lock_endtime = 0;
 
-void sendCode() {
-  if (!queueInputCode.isEmpty ()) {
-    char buffer[DIGITS + 1];
-    byte index = 0;
-    while ( !queueInputCode.isEmpty() ) {
-      buffer[index++] = queueInputCode.dequeue();
-    }
-    buffer[index] = 0;
-    Serial.printf("Send code: %s\n", buffer);
-    mqttClient.publish(MQTT_TOPIC_CODE, 1, false, buffer);
-  } else {
-    Serial.println("The code is empty. Nothing to send.");
-  }
-}
 
 void readConfigurationFile() {
   //read configuration from FS json
@@ -205,11 +190,7 @@ void createCustomWiFiManager() {
   //if it does not connect it starts an access point with the specified name
   //and goes into a blocking loop awaiting configuration
   if (!wifiManager.autoConnect(WIFI_AP_NAME, WIFI_AP_PASS)) {
-    Serial.println("failed to connect and hit timeout");
-    delay(3000);
-    //reset and try again, or maybe put it to deep sleep
-    ESP.reset();
-    delay(5000);
+    Serial.println("Failed to connect and hit timeout");
   }
 
   //if you get here you have connected to the WiFi
@@ -224,71 +205,6 @@ void createCustomWiFiManager() {
 
 
 // ---------------------------------------------------------
-void setup() {
-  #if defined (__AVR_ATtiny85__)
-  if (F_CPU == 16000000) clock_prescale_set(clock_div_1);
-#endif
-  //All initializations start. Turn on all LEDs to white
-  pixels.begin();
-  pixels.setPixelColor(0, pixels.Color(255, 255, 255));
-  pixels.setPixelColor(1, pixels.Color(255, 255, 255));
-  pixels.setPixelColor(2, pixels.Color(255, 255, 255));
-  pixels.setPixelColor(3, pixels.Color(255, 255, 255));
-  pixels.show();
-  
-  Serial.begin(115200);
-  Serial.println();
-
-  //clean FS, for testing
-  //SPIFFS.format();
-  
-
-  Serial.println("Read the configuration file.");
-  readConfigurationFile();
-
-  Serial.println("Configure WiFi");
-  createCustomWiFiManager();
-
-  // Save the custom parameters to FS
-  if (shouldSaveConfig) {
-    writeConfigurationFile();
-  }
-
-  Serial.println("Configure MQTT");
-  Serial.printf("MQTT: Server: %s port: %s\n", mqtt_server, mqtt_port);
-  
-  int p = atoi(mqtt_port);
-  mqttClient.setServer(mqtt_server, p);
-  mqttClient.setCredentials(mqtt_login, mqtt_password);
-  mqttClient.setKeepAlive(30);
-  mqttClient.setWill(MQTT_TOPIC_STATUS, 1, true, MQTT_STATUS_PAYLOAD_OFF); //topic, QoS, retain, payload
-
-  Serial.println("MQTT: Set callbacks");
-  mqttClient.onConnect(onMqttConnect);
-  mqttClient.onDisconnect(onMqttDisconnect);
-  mqttClient.onMessage(onMqttMessage);
-
-  Serial.println("MQTT: Connecting to broker...");
-  mqttClient.connect();
-
-  // Animation
-  waActive = false;
-  errActive = false;
-
-  queueInputCode.setPrinter(Serial);
-
-  // All initializations are done. Turn off all LEDs
-  pixels.setPixelColor(0, pixels.Color(0,0,0));
-  pixels.setPixelColor(1, pixels.Color(0,0,0));
-  pixels.setPixelColor(2, pixels.Color(0,0,0));
-  pixels.setPixelColor(3, pixels.Color(0,0,0));
-  pixels.show();
-
-  waActive = true; //will be off when connected to mqtt
-
-  timer.setInterval(INTERVAL_PUBLISH_STATE, publishState);
-}
-
 char *uptime(unsigned long milli)
 {
   static char _return[32];
@@ -302,7 +218,60 @@ char *uptime(unsigned long milli)
   return _return;
 }
 
-// MQTT -----
+// MQTT ---------------------------------------------
+/* Send an input code as an mqtt message */
+void sendCode() {
+  if (!queueInputCode.isEmpty ()) {
+    char buffer[DIGITS + 1];
+    byte index = 0;
+    while ( !queueInputCode.isEmpty() ) {
+      buffer[index++] = queueInputCode.dequeue();
+    }
+    buffer[index] = 0;
+    Serial.printf("Send code: %s\n", buffer);
+    mqttClient.publish(MQTT_TOPIC_CODE, 1, false, buffer);
+  } else {
+    Serial.println("The code is empty. Nothing to send.");
+  }
+}
+
+/* Publish the current state odf the device. It will be called perioudically. */
+void publishState() {
+  const int BUFFER_SIZE = JSON_OBJECT_SIZE(20);
+  StaticJsonBuffer<BUFFER_SIZE> jsonBuffer;
+
+  JsonObject& root = jsonBuffer.createObject();
+
+  char ip[16];
+  memset(ip, 0, 18);
+  sprintf(ip, "%s", WiFi.localIP().toString().c_str());
+  root["ip"] = ip;
+
+  uint8_t macAddr[6];
+  WiFi.macAddress(macAddr);
+  char mac[18];
+  memset(mac, 0, 18);
+  sprintf(mac, "%02X:%02X:%02X:%02X:%02X:%02X", macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5]);
+  root["mac"] = mac;
+
+  char rssi[8];
+  sprintf(rssi, "%d", WiFi.RSSI());
+  root["rssi"] = rssi;
+
+  root["uptime"] = uptime( millis() );
+
+  // Firmware version
+  root["version"] = FIRMWARE_VERSION;
+
+  char buffer[root.measureLength() + 1];
+  root.printTo(buffer, sizeof(buffer));
+
+  Serial.printf("\nMQTT: Publish state: %s\n", buffer);
+
+  mqttClient.publish(MQTT_TOPIC_STATE, 0, true, buffer);
+}
+
+
 void onMqttConnect(bool sessionPresent) {
   Serial.println("MQTT: Connected");
   Serial.printf("MQTT: Session present: %d\n", sessionPresent);
@@ -321,7 +290,7 @@ void onMqttConnect(bool sessionPresent) {
 
 void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
   waActive = true;
-  
+
   Serial.println();
   Serial.print("MQTT: Disconnected: ");
   if (reason == AsyncMqttClientDisconnectReason::TCP_DISCONNECTED) {
@@ -345,38 +314,6 @@ void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
   if (WiFi.isConnected()) {
     mqttClient.connect();
   }
-}
-
-void publishState() {
-  const int BUFFER_SIZE = JSON_OBJECT_SIZE(20);
-  StaticJsonBuffer<BUFFER_SIZE> jsonBuffer;
-
-  JsonObject& root = jsonBuffer.createObject();
-  
-  char ip[16];
-  memset(ip, 0, 18);
-  sprintf(ip, "%s", WiFi.localIP().toString().c_str());
-  root["ip"] = ip;
-
-  uint8_t macAddr[6];
-  WiFi.macAddress(macAddr);
-  char mac[18];
-  memset(mac, 0, 18);
-  sprintf(mac, "%02X:%02X:%02X:%02X:%02X:%02X", macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5]);
-  root["mac"] = mac;
-
-  char rssi[8];
-  sprintf(rssi, "%d", WiFi.RSSI());
-  root["rssi"] = rssi;
-
-  root["uptime"] = uptime( millis() );
-  
-  char buffer[root.measureLength() + 1];
-  root.printTo(buffer, sizeof(buffer));
-
-  Serial.printf("\nMQTT: Publish state: %s\n", buffer);
-
-  mqttClient.publish(MQTT_TOPIC_STATE, 0, true, buffer);
 }
 
 
@@ -427,16 +364,19 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
   }
 }
 
-// --------------
 
-
+// ----------------------------------------------
+/*
+ * The function shows a wating animation as a running blue light
+ * from right to left and back.
+ */
 void waitingAnimation() {
   if (waActive) {
     unsigned int count = millis() / 100;
     if (waCount != count) {
       waCount = count;
       if (waForward) {
-        waActiveLED += 1; 
+        waActiveLED += 1;
       } else {
         waActiveLED -= 1;
       }
@@ -453,7 +393,9 @@ void waitingAnimation() {
   }
 }
 
-
+/*
+ * The function shows an error animation as a flashing red light.
+ */
 void errorAnimation() {
   if (errActive) {
     unsigned int count = millis() / 250;
@@ -474,6 +416,97 @@ void errorAnimation() {
   }
 }
 
+void setup() {
+  #if defined (__AVR_ATtiny85__)
+  if (F_CPU == 16000000) clock_prescale_set(clock_div_1);
+#endif
+  //All initializations start. Turn on all LEDs to white
+  pixels.begin();
+  pixels.setPixelColor(0, pixels.Color(255, 255, 255));
+  pixels.setPixelColor(1, pixels.Color(255, 255, 255));
+  pixels.setPixelColor(2, pixels.Color(255, 255, 255));
+  pixels.setPixelColor(3, pixels.Color(255, 255, 255));
+  pixels.show();
+
+  Serial.begin(115200);
+  Serial.println();
+
+  //clean FS, for testing
+  //SPIFFS.format();
+
+  waActive = true; //will be off when connected to mqtt
+
+
+  Serial.println("Read the configuration file.");
+  readConfigurationFile();
+
+  Serial.println("Configure WiFi");
+  createCustomWiFiManager();
+
+  // Save the custom parameters to FS
+  if (shouldSaveConfig) {
+    writeConfigurationFile();
+  }
+
+  Serial.println("Configure MQTT");
+  Serial.printf("MQTT: Server: %s port: %s\n", mqtt_server, mqtt_port);
+
+  int p = atoi(mqtt_port);
+  mqttClient.setServer(mqtt_server, p);
+  mqttClient.setCredentials(mqtt_login, mqtt_password);
+  mqttClient.setKeepAlive(30);
+  mqttClient.setWill(MQTT_TOPIC_STATUS, 1, true, MQTT_STATUS_PAYLOAD_OFF); //topic, QoS, retain, payload
+
+  Serial.println("MQTT: Set callbacks");
+  mqttClient.onConnect(onMqttConnect);
+  mqttClient.onDisconnect(onMqttDisconnect);
+  mqttClient.onMessage(onMqttMessage);
+
+  //Serial.println("MQTT: Connecting to broker...");
+  //mqttClient.connect();
+  /* Connect the MQTT client to the broker */
+  int8_t attemptToConnectToMQTT = 0;
+  Serial.println("MQTT: Connect to the broker");
+  while ( (mqttClient.connected() == false) && (attemptToConnectToMQTT < 5) ) {
+    if (WiFi.isConnected()) {
+      Serial.printf("MQTT: Attempt %d. Connecting to broker ... \n", attemptToConnectToMQTT );
+      mqttClient.connect();
+    } else {
+      //attemptToConnectToMQTT = 0;
+      Serial.println("MQTT: WiFi is not connected. Try to reconnect WiFi.");
+      WiFi.reconnect();
+    }
+    delay(3000);
+    attemptToConnectToMQTT += 1;
+  }
+
+  /* If there is still no connection here, restart the device */
+  if (!WiFi.isConnected()) {
+    Serial.println("setup(): WiFi is not connected. Reset the device to initiate connection again.");
+    ESP.restart();
+  }
+
+  if (!mqttClient.connected()) {
+    Serial.println("setup(): The device is not connected to MQTT. Reset the device to initiate connection again.");
+    ESP.restart();
+  }
+
+  // Animation
+  waActive = false;
+  errActive = false;
+
+  queueInputCode.setPrinter(Serial);
+
+  // All initializations are done. Turn off all LEDs
+  pixels.setPixelColor(0, pixels.Color(0,0,0));
+  pixels.setPixelColor(1, pixels.Color(0,0,0));
+  pixels.setPixelColor(2, pixels.Color(0,0,0));
+  pixels.setPixelColor(3, pixels.Color(0,0,0));
+  pixels.show();
+
+  timer.setInterval(INTERVAL_PUBLISH_STATE, publishState);
+}
+
 
 void loop() {
   timer.run();
@@ -487,10 +520,10 @@ void loop() {
     lock_endtime = 0;
     errActive = false;
   }
-  
+
   if ( (!waActive) && (!errActive) ) {
     char key = keypad.getKey();
-    
+
     if (key) {
       Serial.printf("Input symbol: [%c]\n", key);
       switch(key)
@@ -507,7 +540,7 @@ void loop() {
 
       Serial.printf("  length: %d; Queue is full: %d\n", queueInputCode.count(), queueInputCode.isFull());
     }
-  
+
     for (byte i = 0; i < DIGITS; i++ ) {
       bool isON = i < queueInputCode.count();
        if ( isON ) {
@@ -519,4 +552,9 @@ void loop() {
   }
 
   pixels.show();
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("loop(): WiFi is not connected. Reset the device to initiate connection again.");
+    ESP.restart();
+  }
 }
